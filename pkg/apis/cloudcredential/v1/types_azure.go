@@ -40,6 +40,14 @@ type AzureProviderSpec struct {
 	// +optional
 	Permissions []string `json:"permissions,omitempty"`
 
+	AzureClientID string `json:"azureClientID"`
+
+	AzureRegion string `json:"azureRegion"`
+
+	AzureSubscriptionID string `json:"azureSubscriptionID"`
+
+	AzureTenantID string `json:"azureTenantID"`
+
 	// DataPermissions is the list of Azure data permissions required to create a more fine-grained custom
 	// role to satisfy the CredentialsRequest.
 	// The DataPermissions field may be provided in addition to RoleBindings. When both fields are specified,

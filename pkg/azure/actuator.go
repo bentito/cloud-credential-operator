@@ -41,6 +41,15 @@ import (
 	"github.com/openshift/cloud-credential-operator/pkg/operator/utils"
 )
 
+const (
+	workloadCredsTemplate = `
+azure_client_id: %s
+azure_tenant_id: %s
+azure_region: %s
+azure_subscription_id: %s
+azure_federated_token_file: %s`
+)
+
 var _ actuatoriface.Actuator = (*Actuator)(nil)
 
 // Actuator implements the CredentialsRequest Actuator interface to create credentials for Azure.
@@ -230,36 +239,58 @@ func (a *Actuator) sync(ctx context.Context, cr *minterv1.CredentialsRequest) er
 		logger.Debug("credentials already up to date")
 		return nil
 	}
-
-	credentialsRootSecret, err := a.GetCredentialsRootSecret(ctx, cr)
+	stsDetected, err := utils.IsTimedTokenCluster(a.client, ctx, logger)
 	if err != nil {
-		logger.WithError(err).Error("issue with cloud credentials secret")
 		return err
 	}
-
-	switch credentialsRootSecret.Annotations[constants.AnnotationKey] {
-	case constants.InsufficientAnnotation:
-		msg := "cloud credentials insufficient to satisfy credentials request"
-		logger.Error(msg)
-		return &actuatoriface.ActuatorError{
-			ErrReason: minterv1.InsufficientCloudCredentials,
-			Message:   msg,
-		}
-	case constants.PassthroughAnnotation:
-		logger.Debugf("provisioning with passthrough")
-		err := a.syncPassthrough(ctx, cr, credentialsRootSecret, logger)
+	logger.Infof("stsDetected: %v", stsDetected)
+	if stsDetected {
+		logger.Debug("actuator detected Azure AD Workload Identity enabled cluster, enabling Workload Identity secret brokering for CredentialsRequests providing a Managed Identity")
+		azureProviderSpec, err := decodeProviderSpec(minterv1.Codec, cr)
 		if err != nil {
 			return err
 		}
-	default:
-		msg := fmt.Sprintf("unexpected value or missing %s annotation on admin credentials Secret", constants.AnnotationKey)
-		logger.Info(msg)
-		return &actuatoriface.ActuatorError{
-			ErrReason: minterv1.CredentialsProvisionFailure,
-			Message:   msg,
+		//TODO the 3 spec fields need to be defined (maybe) but for sure checked here:
+		//if azureWorkloadIDs...
+		azureFederatedTokenFile := cr.Spec.CloudTokenPath
+		if cr.Spec.CloudTokenPath == "" {
+			logger.Debug("CredentialsRequest has no cloudTokenPath, defaulting azure_federated_token_file to /var/run/secrets/kubernetes.io/serviceaccount/token")
+			azureFederatedTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+		}
+		err = a.syncWorkloadIdentitySecret(*azureProviderSpec, azureFederatedTokenFile, cr, logger, ctx)
+		if err != nil {
+			return err
+		}
+	} else {
+		credentialsRootSecret, err := a.GetCredentialsRootSecret(ctx, cr)
+		if err != nil {
+			logger.WithError(err).Error("issue with cloud credentials secret")
+			return err
+		}
+
+		switch credentialsRootSecret.Annotations[constants.AnnotationKey] {
+		case constants.InsufficientAnnotation:
+			msg := "cloud credentials insufficient to satisfy credentials request"
+			logger.Error(msg)
+			return &actuatoriface.ActuatorError{
+				ErrReason: minterv1.InsufficientCloudCredentials,
+				Message:   msg,
+			}
+		case constants.PassthroughAnnotation:
+			logger.Debugf("provisioning with passthrough")
+			err := a.syncPassthrough(ctx, cr, credentialsRootSecret, logger)
+			if err != nil {
+				return err
+			}
+		default:
+			msg := fmt.Sprintf("unexpected value or missing %s annotation on admin credentials Secret", constants.AnnotationKey)
+			logger.Info(msg)
+			return &actuatoriface.ActuatorError{
+				ErrReason: minterv1.CredentialsProvisionFailure,
+				Message:   msg,
+			}
 		}
 	}
-
 	return nil
 }
 
@@ -491,4 +522,93 @@ func (a *Actuator) getLogger(cr *minterv1.CredentialsRequest) log.FieldLogger {
 // value is for things to be upgradeable.
 func (a *Actuator) Upgradeable(mode operatorv1.CloudCredentialsMode) *configv1.ClusterOperatorStatusCondition {
 	return utils.UpgradeableCheck(a.client.RootCredClient, mode, a.GetCredentialsRootSecretLocation())
+}
+
+// Generated Secret needs to look like this:
+/*
+	apiVersion: v1
+	stringData:
+	  azure_client_id: 0420bfd1-ab26-4b80-a9ac-deadbeeff1f9
+	  azure_tenant_id: 6047c7e9-b2ad-488d-a54e-deadbeefa7ee
+	  azure_region: centralus
+	  azure_subscription_id: 8c20ec23-8478-4f46-96f4-deadbeeff185
+	  azure_federated_token_file: /var/run/secrets/openshift/serviceaccount/token
+	kind: Secret
+	metadata:
+	  name: azure-cloud-credentials
+	  namespace: openshift-machine-api
+	type: Opaque
+*/
+// The first 4 fields need to come from `spec.ProviderSpec` in the CredentialsRequest with
+// spec.cloudTokenPath matching up to: `azure_federated_token_file`
+func (a *Actuator) syncWorkloadIdentitySecret(
+	azureProviderSpec minterv1.AzureProviderSpec,
+	azureFederatedTokenFile string,
+	cr *minterv1.CredentialsRequest,
+	logger log.FieldLogger, ctx context.Context) error {
+	sLog := logger.WithFields(log.Fields{
+		"targetSecret": fmt.Sprintf("%s/%s", cr.Spec.SecretRef.Namespace, cr.Spec.SecretRef.Name),
+		"cr":           fmt.Sprintf("%s/%s", cr.Namespace, cr.Name),
+	})
+	sLog.Infof("processing secret")
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cr.Spec.SecretRef.Name,
+			Namespace: cr.Spec.SecretRef.Namespace,
+		},
+	}
+	err := validateAzureProviderSpec(azureProviderSpec)
+	if err != nil {
+		return err
+	}
+	op, err := controllerutil.CreateOrPatch(ctx, a.client, secret, func() error {
+		if secret.Labels == nil {
+			secret.Labels = map[string]string{}
+		}
+		secret.Labels[minterv1.LabelCredentialsRequest] = minterv1.LabelCredentialsRequestValue
+		if secret.Annotations == nil {
+			secret.Annotations = map[string]string{}
+		}
+		secret.Annotations[minterv1.AnnotationCredentialsRequest] = fmt.Sprintf("%s/%s", cr.Namespace, cr.Name)
+		if secret.StringData == nil {
+			secret.StringData = map[string]string{}
+		}
+		secret.StringData["credentials"] = fmt.Sprintf(
+			workloadCredsTemplate,
+			azureProviderSpec.AzureClientID,
+			azureProviderSpec.AzureTenantID,
+			azureProviderSpec.AzureRegion,
+			azureProviderSpec.AzureSubscriptionID,
+			azureFederatedTokenFile)
+		secret.Type = corev1.SecretTypeOpaque
+		return nil
+	})
+	sLog.WithField("operation", op).Info("processed secret")
+	if err != nil {
+		return &actuatoriface.ActuatorError{
+			ErrReason: minterv1.CredentialsProvisionFailure,
+			Message:   "error processing secret",
+		}
+	}
+	return nil
+}
+
+func validateAzureProviderSpec(azureProviderSpec minterv1.AzureProviderSpec) error {
+	var errors []error
+	if azureProviderSpec.AzureClientID == "" {
+		errors = append(errors, fmt.Errorf("AzureClientID must not be empty"))
+	}
+	if azureProviderSpec.AzureTenantID == "" {
+		errors = append(errors, fmt.Errorf("AzureTenantID must not be empty"))
+	}
+	if azureProviderSpec.AzureRegion == "" {
+		errors = append(errors, fmt.Errorf("AzureRegion must not be empty"))
+	}
+	if azureProviderSpec.AzureSubscriptionID == "" {
+		errors = append(errors, fmt.Errorf("AzureSubscriptionID must not be empty"))
+	}
+	if len(errors) > 0 {
+		return fmt.Errorf("AzureProviderSpec validation failed: %v", errors)
+	}
+	return nil
 }
