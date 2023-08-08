@@ -18,7 +18,10 @@ package azure_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	operatorv1 "github.com/openshift/api/operator/v1"
+	schemeutils "github.com/openshift/cloud-credential-operator/pkg/util"
 	"reflect"
 	"testing"
 	"time"
@@ -185,13 +188,7 @@ func getProviderStatus(t *testing.T, cr *minterv1.CredentialsRequest) minterv1.A
 }
 
 func TestActuator(t *testing.T) {
-	if err := openshiftapiv1.Install(scheme.Scheme); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := minterv1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatal(err)
-	}
+	schemeutils.SetupScheme(scheme.Scheme)
 
 	tests := []struct {
 		name               string
@@ -204,8 +201,12 @@ func TestActuator(t *testing.T) {
 		validate           func(*testing.T, client.Client, client.Client)
 	}{
 		{
-			name:               "Process a CredentialsRequest",
-			existing:           defaultExistingObjects(),
+			name: "Process a CredentialsRequest",
+			existing: func() []runtime.Object {
+				objects := defaultExistingObjects()
+				objects = append(objects, testOperatorConfig(operatorv1.CloudCredentialsModePassthrough))
+				return objects
+			}(),
 			existingAdmin:      []runtime.Object{&validPassthroughRootSecret},
 			credentialsRequest: testCredentialsRequest(t),
 			op: func(actuator *azure.Actuator, cr *minterv1.CredentialsRequest) error {
@@ -245,6 +246,7 @@ func TestActuator(t *testing.T) {
 				}
 
 				objects = append(objects, targetSecret)
+				objects = append(objects, testOperatorConfig(operatorv1.CloudCredentialsModeMint))
 
 				return objects
 			}(),
@@ -323,6 +325,7 @@ func TestActuator(t *testing.T) {
 				}
 
 				objects = append(objects, targetSecret)
+				objects = append(objects, testOperatorConfig(operatorv1.CloudCredentialsModePassthrough))
 
 				return objects
 			}(),
@@ -406,6 +409,7 @@ func TestActuator(t *testing.T) {
 				}
 
 				objects = append(objects, targetSecret)
+				objects = append(objects, testOperatorConfig(operatorv1.CloudCredentialsModeMint))
 
 				return objects
 			}(),
@@ -479,6 +483,7 @@ func TestActuator(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			allObjects := append(test.existing, test.credentialsRequest)
 			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme.Scheme).
 				WithStatusSubresource(&minterv1.CredentialsRequest{}).
 				WithRuntimeObjects(allObjects...).Build()
 			fakeAdminClient := fake.NewClientBuilder().
@@ -517,6 +522,153 @@ func TestActuator(t *testing.T) {
 				require.NoError(t, testErr, "unexpected error returned during test case")
 				test.validate(t, fakeClient, fakeAdminClient)
 			}
+		})
+	}
+}
+
+func TestActuatorCreateOnWorkloadIdentity(t *testing.T) {
+	schemeutils.SetupScheme(scheme.Scheme)
+
+	// Create the azure-credentials secret
+	azureCredsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      constants.AzureCloudCredSecretName,
+			Namespace: constants.CloudCredSecretNamespace,
+			Annotations: map[string]string{
+				constants.AnnotationKey: constants.PassthroughAnnotation,
+			},
+		},
+		Data: map[string][]byte{
+			"azure_client_id":       []byte("fake-client-id"),
+			"azure_client_secret":   []byte("fake-client-secret"),
+			"azure_tenant_id":       []byte("fake-tenant-id"),
+			"azure_subscription_id": []byte("fake-subscription-id"),
+		},
+	}
+
+	tests := []struct {
+		name          string
+		existing      []runtime.Object
+		cr            *minterv1.CredentialsRequest
+		mockAppClient func(*gomock.Controller) *azuremock.MockAppClient
+		wantErr       assert.ErrorAssertionFunc
+		validate      func(*testing.T, client.Client)
+	}{
+		{
+			name: "Correctly configured Azure Workload Identity fields",
+			existing: func() []runtime.Object {
+				objects := defaultExistingObjects()
+				objects = append(objects, testOperatorConfig(operatorv1.CloudCredentialsModeManual))
+				return objects
+			}(),
+			cr: func() *minterv1.CredentialsRequest {
+				cr := testCredentialsRequest(t)
+
+				azureSpec := &minterv1.AzureProviderSpec{}
+				err := minterv1.Codec.DecodeProviderSpec(cr.Spec.ProviderSpec, azureSpec)
+				require.NoError(t, err, "error decoding provider spec")
+
+				azureSpec.AzureClientID = "0420bfd1-ab26-4b80-a9ac-deadbeeff1f9"
+				azureSpec.AzureTenantID = "6047c7e9-b2ad-488d-a54e-deadbeefa7ee"
+				azureSpec.AzureRegion = "centralus"
+				azureSpec.AzureSubscriptionID = "/var/run/secrets/openshift/serviceaccount/token"
+
+				encodedSpec, err := json.Marshal(azureSpec)
+				require.NoError(t, err, "error encoding provider spec")
+				cr.Spec.ProviderSpec = &runtime.RawExtension{Raw: encodedSpec}
+
+				rawStatus := &minterv1.AzureProviderStatus{
+					ServicePrincipalName: testAppRegName,
+					AppID:                testAppRegID,
+				}
+				encodedStatus, err := minterv1.Codec.EncodeProviderStatus(rawStatus)
+				require.NoError(t, err, "error encoding status")
+				cr.Status.ProviderStatus = encodedStatus
+				cr.Status.Provisioned = true
+
+				return cr
+			}(),
+			mockAppClient: func(ctrl *gomock.Controller) *azuremock.MockAppClient {
+				return azuremock.NewMockAppClient(ctrl)
+			},
+			wantErr:  assert.NoError,
+			validate: func(t *testing.T, c client.Client) {},
+		},
+		{
+			name: "Incorrectly configured Azure Workload Identity fields",
+			existing: func() []runtime.Object {
+				objects := defaultExistingObjects()
+				objects = append(objects, testOperatorConfig(operatorv1.CloudCredentialsModeManual))
+				return objects
+			}(),
+			cr: func() *minterv1.CredentialsRequest {
+				cr := testCredentialsRequest(t)
+
+				azureSpec := &minterv1.AzureProviderSpec{}
+				err := minterv1.Codec.DecodeProviderSpec(cr.Spec.ProviderSpec, azureSpec)
+				require.NoError(t, err, "error decoding provider spec")
+
+				// Modify fields in the AzureProviderSpec should fail validation
+				azureSpec.AzureClientID = ""
+				azureSpec.AzureTenantID = "invalid"
+				azureSpec.AzureRegion = "invalid"
+				azureSpec.AzureSubscriptionID = ""
+
+				encodedSpec, err := json.Marshal(azureSpec)
+				require.NoError(t, err, "error encoding provider spec")
+				cr.Spec.ProviderSpec = &runtime.RawExtension{Raw: encodedSpec}
+
+				rawStatus := &minterv1.AzureProviderStatus{
+					ServicePrincipalName: testAppRegName,
+					AppID:                testAppRegID,
+				}
+				encodedStatus, err := minterv1.Codec.EncodeProviderStatus(rawStatus)
+				require.NoError(t, err, "error encoding status")
+				cr.Status.ProviderStatus = encodedStatus
+				cr.Status.Provisioned = true
+
+				return cr
+			}(),
+			mockAppClient: func(ctrl *gomock.Controller) *azuremock.MockAppClient {
+				return azuremock.NewMockAppClient(ctrl)
+			},
+			wantErr:  assert.Error,
+			validate: nil,
+		},
+	}
+
+	for _, test := range tests {
+		// Append the azure-credentials secret to the existing objects for each test
+		test.existing = append(test.existing, azureCredsSecret)
+		// Here, we ensure the fake authentication is available for the test
+		test.existing = append(test.existing, testAuthentication("test-issuer"))
+
+		fakeClient := fake.NewClientBuilder().
+			WithStatusSubresource(test.cr).
+			WithRuntimeObjects(test.existing...).Build()
+
+		t.Run(test.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			appClient := test.mockAppClient(ctrl)
+
+			act := azure.NewFakeActuator(
+				fakeClient,
+				fakeClient,
+				func(logger log.FieldLogger, clientID, clientSecret, tenantID, subscriptionID string) (*azure.AzureCredentialsMinter, error) {
+					return azure.NewFakeAzureCredentialsMinter(logger, clientID, clientSecret, tenantID, subscriptionID, appClient)
+				},
+			)
+
+			ctx := context.TODO()
+			err := act.Create(ctx, test.cr)
+
+			test.wantErr(t, err)
+
+			if test.validate != nil {
+				test.validate(t, fakeClient)
+			}
+
+			ctrl.Finish()
 		})
 	}
 }
@@ -606,4 +758,32 @@ func assertSecretEquality(t *testing.T, expectedSecret, assertingSecret *corev1.
 	assert.Equal(t, expectedSecret.Data[azure.AzureResourcePrefix], assertingSecret.Data[azure.AzureResourcePrefix])
 	assert.Equal(t, expectedSecret.Data[azure.AzureSubscriptionID], assertingSecret.Data[azure.AzureSubscriptionID])
 	assert.Equal(t, expectedSecret.Data[azure.AzureTenantID], assertingSecret.Data[azure.AzureTenantID])
+}
+
+func testOperatorConfig(mode operatorv1.CloudCredentialsMode) *operatorv1.CloudCredential {
+	conf := &operatorv1.CloudCredential{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: constants.CloudCredOperatorConfig,
+		},
+		Spec: operatorv1.CloudCredentialSpec{
+			CredentialsMode: mode,
+		},
+	}
+	return conf
+}
+
+func testAuthentication(issuer string) *openshiftapiv1.Authentication {
+	return &openshiftapiv1.Authentication{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster",
+		},
+		Spec: openshiftapiv1.AuthenticationSpec{
+			ServiceAccountIssuer: "non-empty",
+		},
+		Status: openshiftapiv1.AuthenticationStatus{
+			IntegratedOAuthMetadata: openshiftapiv1.ConfigMapNameReference{
+				Name: issuer,
+			},
+		},
+	}
 }

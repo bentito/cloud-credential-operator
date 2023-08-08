@@ -250,8 +250,6 @@ func (a *Actuator) sync(ctx context.Context, cr *minterv1.CredentialsRequest) er
 		if err != nil {
 			return err
 		}
-		//TODO the 3 spec fields need to be defined (maybe) but for sure checked here:
-		//if azureWorkloadIDs...
 		azureFederatedTokenFile := cr.Spec.CloudTokenPath
 		if cr.Spec.CloudTokenPath == "" {
 			logger.Debug("CredentialsRequest has no cloudTokenPath, defaulting azure_federated_token_file to /var/run/secrets/kubernetes.io/serviceaccount/token")
