@@ -557,7 +557,12 @@ func (a *Actuator) syncWorkloadIdentitySecret(
 	}
 	err := validateAzureProviderSpec(azureProviderSpec)
 	if err != nil {
-		return err
+		logger.WithError(err).Error("error determining whether a credentials update is needed")
+		msg := "error validating credentials request Azure AD Workload Identity fields"
+		return &actuatoriface.ActuatorError{
+			ErrReason: minterv1.CredentialsProvisionFailure,
+			Message:   fmt.Sprintf("%v: %v", msg, err),
+		}
 	}
 	op, err := controllerutil.CreateOrPatch(ctx, a.client, secret, func() error {
 		if secret.Labels == nil {
