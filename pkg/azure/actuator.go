@@ -77,7 +77,18 @@ func NewFakeActuator(c, rootCredClient client.Client,
 	}
 }
 
-func (a *Actuator) IsValidMode() error {
+func (a *Actuator) IsValidMode(cr minterv1.CredentialsRequest) error {
+	// client.Mode() tries to get the root secret. Need to short-circuit this if we might be in Manual mode,
+	//   for instance if this is a Workload Identity enabled cluster
+	logger := a.getLogger(&cr)
+	credentialsMode, _, err := utils.GetOperatorConfiguration(a.client, logger)
+	if err != nil {
+		logger.WithError(err).Error("error loading CCO configuration to determine valid mode")
+		return err
+	}
+	if credentialsMode != operatorv1.CloudCredentialsModeManual {
+		return nil
+	}
 	mode, err := a.client.Mode(context.Background())
 	if err != nil {
 		return err
@@ -169,7 +180,7 @@ func (a *Actuator) Delete(ctx context.Context, cr *minterv1.CredentialsRequest) 
 	if isAzure, err := isAzureCredentials(cr.Spec.ProviderSpec); !isAzure {
 		return err
 	}
-	if err := a.IsValidMode(); err != nil {
+	if err := a.IsValidMode(*cr); err != nil {
 		return err
 	}
 
@@ -492,7 +503,7 @@ func (a *Actuator) Exists(ctx context.Context, cr *minterv1.CredentialsRequest) 
 	if isAzure, err := isAzureCredentials(cr.Spec.ProviderSpec); !isAzure {
 		return false, err
 	}
-	if err := a.IsValidMode(); err != nil {
+	if err := a.IsValidMode(*cr); err != nil {
 		return false, err
 	}
 
