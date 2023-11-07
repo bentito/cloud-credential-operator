@@ -20,11 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	operatorv1 "github.com/openshift/api/operator/v1"
-	schemeutils "github.com/openshift/cloud-credential-operator/pkg/util"
 	"reflect"
 	"testing"
 	"time"
+
+	operatorv1 "github.com/openshift/api/operator/v1"
+	schemeutils "github.com/openshift/cloud-credential-operator/pkg/util"
 
 	"github.com/golang/mock/gomock"
 	log "github.com/sirupsen/logrus"
@@ -409,7 +410,6 @@ func TestActuator(t *testing.T) {
 				}
 
 				objects = append(objects, targetSecret)
-				objects = append(objects, testOperatorConfig(operatorv1.CloudCredentialsModeMint))
 
 				return objects
 			}(),
@@ -568,10 +568,10 @@ func TestActuatorCreateOnWorkloadIdentity(t *testing.T) {
 				err := minterv1.Codec.DecodeProviderSpec(cr.Spec.ProviderSpec, azureSpec)
 				require.NoError(t, err, "error decoding provider spec")
 
-				azureSpec.AzureClientID = "0420bfd1-ab26-4b80-a9ac-deadbeeff1f9"
-				azureSpec.AzureTenantID = "6047c7e9-b2ad-488d-a54e-deadbeefa7ee"
-				azureSpec.AzureRegion = "centralus"
-				azureSpec.AzureSubscriptionID = "/var/run/secrets/openshift/serviceaccount/token"
+				azureSpec.AzureClientID = "fake-client-id"
+				azureSpec.AzureTenantID = "fake-tenant-id"
+				azureSpec.AzureRegion = "fake-region"
+				azureSpec.AzureSubscriptionID = "fake-subscription-id"
 
 				encodedSpec, err := json.Marshal(azureSpec)
 				require.NoError(t, err, "error encoding provider spec")

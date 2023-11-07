@@ -144,11 +144,8 @@ func (a *Actuator) needsUpdate(ctx context.Context, cr *minterv1.CredentialsRequ
 		if azureStatus.ServicePrincipalName != "" {
 			return true, nil
 		}
-
-		return false, nil
-	} else {
-		return false, nil
 	}
+	return false, nil
 }
 
 func (a *Actuator) Create(ctx context.Context, cr *minterv1.CredentialsRequest) error {
@@ -234,7 +231,6 @@ func (a *Actuator) sync(ctx context.Context, cr *minterv1.CredentialsRequest) er
 	if err != nil {
 		return err
 	}
-	logger.Infof("stsDetected: %v", stsDetected)
 	if stsDetected {
 		logger.Debug("actuator detected Azure AD Workload Identity enabled cluster, enabling Workload Identity secret brokering for CredentialsRequests providing a Managed Identity")
 		azureProviderSpec, err := decodeProviderSpec(minterv1.Codec, cr)
@@ -247,9 +243,7 @@ func (a *Actuator) sync(ctx context.Context, cr *minterv1.CredentialsRequest) er
 			azureFederatedTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 		}
 		err = a.syncWorkloadIdentitySecret(*azureProviderSpec, azureFederatedTokenFile, cr, logger, ctx)
-		if err != nil {
-			return err
-		}
+		return err
 	} else {
 		credentialsRootSecret, err := a.GetCredentialsRootSecret(ctx, cr)
 		if err != nil {
@@ -586,16 +580,21 @@ func (a *Actuator) syncWorkloadIdentitySecret(
 
 func validateAzureProviderSpec(azureProviderSpec minterv1.AzureProviderSpec) error {
 	var errors []error
-	if azureProviderSpec.AzureClientID == "" {
+	isEmptyAzureClientID := azureProviderSpec.AzureClientID == ""
+	isEmptyAzureTenantID := azureProviderSpec.AzureTenantID == ""
+	isEmptyAzureSubscriptionID := azureProviderSpec.AzureSubscriptionID == ""
+	isEmptyAzureRegion := azureProviderSpec.AzureRegion == ""
+
+	if isEmptyAzureClientID {
 		errors = append(errors, fmt.Errorf("AzureClientID must not be empty"))
 	}
-	if azureProviderSpec.AzureTenantID == "" {
+	if isEmptyAzureTenantID {
 		errors = append(errors, fmt.Errorf("AzureTenantID must not be empty"))
 	}
-	if azureProviderSpec.AzureRegion == "" {
+	if isEmptyAzureRegion {
 		errors = append(errors, fmt.Errorf("AzureRegion must not be empty"))
 	}
-	if azureProviderSpec.AzureSubscriptionID == "" {
+	if isEmptyAzureSubscriptionID {
 		errors = append(errors, fmt.Errorf("AzureSubscriptionID must not be empty"))
 	}
 	if len(errors) > 0 {

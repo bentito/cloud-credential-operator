@@ -40,14 +40,6 @@ type AzureProviderSpec struct {
 	// +optional
 	Permissions []string `json:"permissions,omitempty"`
 
-	AzureClientID string `json:"azureClientID"`
-
-	AzureRegion string `json:"azureRegion"`
-
-	AzureSubscriptionID string `json:"azureSubscriptionID"`
-
-	AzureTenantID string `json:"azureTenantID"`
-
 	// DataPermissions is the list of Azure data permissions required to create a more fine-grained custom
 	// role to satisfy the CredentialsRequest.
 	// The DataPermissions field may be provided in addition to RoleBindings. When both fields are specified,
@@ -55,6 +47,24 @@ type AzureProviderSpec struct {
 	// and RoleBindings.
 	// +optional
 	DataPermissions []string `json:"dataPermissions,omitempty"`
+
+	// The following fields are required only for STS.
+	// AzureClientID is the ID of the ID of the specific application you created in Azure
+	// +optional
+	AzureClientID string `json:"azureClientID,omitempty"`
+
+	// AzureRegion is the geographic region of the Azure service.
+	// +optional
+	AzureRegion string `json:"azureRegion,omitempty"`
+
+	// Each Azure subscription has an ID associated with it, as does the tenant to which a subscription belongs.
+	// AzureSubscriptionID is the ID of the subscription.
+	// +optional
+	AzureSubscriptionID string `json:"azureSubscriptionID,omitempty"`
+
+	// AzureTenantID is the ID of the tenant to which the subscription belongs.
+	// +optional
+	AzureTenantID string `json:"azureTenantID,omitempty"`
 }
 
 // RoleBinding models part of the Azure RBAC Role Binding
