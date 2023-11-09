@@ -102,49 +102,44 @@ func (a *Actuator) needsUpdate(ctx context.Context, cr *minterv1.CredentialsRequ
 	if !exists {
 		return true, nil
 	}
+
 	// passthrough-specifc checks here (now the only kind of checks...)
-	credentialsMode, _, err := utils.GetOperatorConfiguration(a.client, logger)
+	credentialsRootSecret, err := a.GetCredentialsRootSecret(ctx, cr)
 	if err != nil {
-		logger.WithError(err).Error("error loading CCO configuration to determine valid mode")
+		log.WithError(err).Debug("error retrieving cloud credentials secret")
+		return false, err
+	}
+
+	// If the cloud credentials secret has been updated in passthrough mode, we need an update
+	if credentialsRootSecret != nil && credentialsRootSecret.ResourceVersion != cr.Status.LastSyncCloudCredsSecretResourceVersion {
+		logger.Debug("root cloud creds have changed, update is needed")
+		return true, nil
+	}
+
+	// If the target Secret data doesn't match the cloud credentials secret (we haven't yet pivoted to passthrough from mint)
+	// then we need an update
+	targetSecretKey := types.NamespacedName{Namespace: cr.Spec.SecretRef.Namespace, Name: cr.Spec.SecretRef.Name}
+	targetSecret := &corev1.Secret{}
+	if err := a.client.Get(ctx, targetSecretKey, targetSecret); err != nil {
+		logger.WithError(err).Error("failed to fetch target secret")
 		return true, err
 	}
 
-	if credentialsMode == operatorv1.CloudCredentialsModePassthrough {
-		credentialsRootSecret, err := a.GetCredentialsRootSecret(ctx, cr)
-		if err != nil {
-			log.WithError(err).Debug("error retrieving cloud credentials secret")
-			return false, err
-		}
-		// If the cloud credentials secret has been updated in passthrough mode, we need an update
-		if credentialsRootSecret != nil && credentialsRootSecret.ResourceVersion != cr.Status.LastSyncCloudCredsSecretResourceVersion {
-			logger.Debug("root cloud creds have changed, update is needed")
-			return true, nil
-		}
-
-		// If the target Secret data doesn't match the cloud credentials secret (we haven't yet pivoted to passthrough from mint)
-		// then we need an update
-		targetSecretKey := types.NamespacedName{Namespace: cr.Spec.SecretRef.Namespace, Name: cr.Spec.SecretRef.Name}
-		targetSecret := &corev1.Secret{}
-		if err := a.client.Get(ctx, targetSecretKey, targetSecret); err != nil {
-			logger.WithError(err).Error("failed to fetch target secret")
-			return true, err
-		}
-
-		if string(targetSecret.Data[AzureClientID]) != string(credentialsRootSecret.Data[AzureClientID]) ||
-			string(targetSecret.Data[AzureClientSecret]) != string(credentialsRootSecret.Data[AzureClientSecret]) {
-			return true, nil
-		}
-
-		// If we still have lingering App Registration info, we should try to clean it up if possible
-		azureStatus, err := decodeProviderStatus(minterv1.Codec, cr)
-		if err != nil {
-			return true, err
-		}
-
-		if azureStatus.ServicePrincipalName != "" {
-			return true, nil
-		}
+	if string(targetSecret.Data[AzureClientID]) != string(credentialsRootSecret.Data[AzureClientID]) ||
+		string(targetSecret.Data[AzureClientSecret]) != string(credentialsRootSecret.Data[AzureClientSecret]) {
+		return true, nil
 	}
+
+	// If we still have lingering App Registration info, we should try to clean it up if possible
+	azureStatus, err := decodeProviderStatus(minterv1.Codec, cr)
+	if err != nil {
+		return true, err
+	}
+
+	if azureStatus.ServicePrincipalName != "" {
+		return true, nil
+	}
+
 	return false, nil
 }
 

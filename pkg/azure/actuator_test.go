@@ -247,7 +247,7 @@ func TestActuator(t *testing.T) {
 				}
 
 				objects = append(objects, targetSecret)
-				objects = append(objects, testOperatorConfig(operatorv1.CloudCredentialsModeMint))
+				objects = append(objects, testOperatorConfig(operatorv1.CloudCredentialsModePassthrough))
 
 				return objects
 			}(),
@@ -410,6 +410,7 @@ func TestActuator(t *testing.T) {
 				}
 
 				objects = append(objects, targetSecret)
+				objects = append(objects, testOperatorConfig(operatorv1.CloudCredentialsModePassthrough))
 
 				return objects
 			}(),
@@ -487,6 +488,7 @@ func TestActuator(t *testing.T) {
 				WithStatusSubresource(&minterv1.CredentialsRequest{}).
 				WithRuntimeObjects(allObjects...).Build()
 			fakeAdminClient := fake.NewClientBuilder().
+				WithScheme(scheme.Scheme).
 				WithRuntimeObjects(test.existingAdmin...).Build()
 			mockCtrl := gomock.NewController(t)
 			defer mockCtrl.Finish()
